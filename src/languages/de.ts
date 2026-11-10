@@ -7270,6 +7270,7 @@ _Für ausführlichere Anweisungen [besuchen Sie unsere Hilfeseite](${CONST.NETSU
                 integrationExportTitle: (integration: string, exportPageLink?: string) =>
                     `Wähle das ${integration}-Konto, in das Transaktionen exportiert werden sollen.${exportPageLink ? ` Wähle eine andere <a href="${exportPageLink}">Exportoption</a>, um die verfügbaren Konten zu ändern.` : ''}`,
                 lastUpdated: 'Zuletzt aktualisiert',
+                lastSuccessfulSync: 'Letzte erfolgreiche Synchronisierung',
                 transactionStartDate: 'Transaktionsstartdatum',
                 bulkUpdateTransactionStartDate: 'Transaktionsstartdatum aktualisieren',
                 updateCard: 'Karte aktualisieren',
