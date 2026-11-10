@@ -2736,6 +2736,7 @@ export {
     getDisplayableThirdPartyCards,
     isExpiredCard,
     getCardOrFeedCurrency,
+    parseCardLastScrape,
     getSelectedCardsSharedCurrency,
     getCardHintText,
     resolveTransactionCardFields,

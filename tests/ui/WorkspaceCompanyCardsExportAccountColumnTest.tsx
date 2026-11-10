@@ -14,6 +14,7 @@ import ONYXKEYS from '@src/ONYXKEYS';
 import type {Card} from '@src/types/onyx';
 import type {CompanyCardFeedWithDomainID, CompanyCardFeedWithNumber} from '@src/types/onyx/CardFeeds';
 
+import type {ListRenderItem, ListRenderItemInfo} from '@shopify/flash-list';
 import type {PartialDeep} from 'type-fest';
 
 import React from 'react';
@@ -37,6 +38,9 @@ const START_DATE_ERROR_KEY = 'startDateError';
 let capturedColumns: Array<TableColumn<string, WorkspaceCompanyCardTableItemData>> = [];
 let capturedData: WorkspaceCompanyCardTableItemData[] = [];
 let capturedCompareItems: CompareItemsCallback<WorkspaceCompanyCardTableItemData, string> | undefined;
+let capturedRenderItem: ListRenderItem<WorkspaceCompanyCardTableItemData> | undefined;
+let mockShouldUseNarrowLayout = false;
+let mockIsMediumScreenWidth = false;
 let mockCardFeedErrors: Record<string, {shouldPromptBrokenConnection?: boolean}> = {};
 
 jest.mock('@hooks/useLazyAsset', () => ({
@@ -56,7 +60,7 @@ jest.mock('@hooks/useNetwork', () => ({
 
 jest.mock('@hooks/useResponsiveLayout', () => ({
     __esModule: true,
-    default: () => ({shouldUseNarrowLayout: false, isMediumScreenWidth: false}),
+    default: () => ({shouldUseNarrowLayout: mockShouldUseNarrowLayout, isMediumScreenWidth: mockIsMediumScreenWidth}),
 }));
 
 jest.mock('@components/ActivityIndicator', () => {
@@ -76,6 +80,7 @@ type MockTableProps = {
     columns: Array<TableColumn<string, WorkspaceCompanyCardTableItemData>>;
     data: WorkspaceCompanyCardTableItemData[];
     compareItems: CompareItemsCallback<WorkspaceCompanyCardTableItemData, string>;
+    renderItem: ListRenderItem<WorkspaceCompanyCardTableItemData>;
 };
 
 // The real Table drives a FlashList and its own text measurement, neither of which this test needs: it only checks
@@ -87,17 +92,21 @@ jest.mock('@components/Table', () => {
 
     // Kept outside MockTable, which the React Compiler treats as a component: capturing render props into a module
     // variable is only for this test's assertions and would otherwise look like an impure component body.
-    function captureTableProps(columns: MockTableProps['columns'], data: MockTableProps['data'], compareItems: MockTableProps['compareItems']) {
+    function captureTableProps(columns: MockTableProps['columns'], data: MockTableProps['data'], compareItems: MockTableProps['compareItems'], renderItem: MockTableProps['renderItem']) {
         capturedColumns = columns;
         capturedData = data;
         capturedCompareItems = compareItems;
+        capturedRenderItem = renderItem;
     }
 
-    function MockTable({children, columns, data, compareItems}: MockTableProps) {
-        captureTableProps(columns, data, compareItems);
+    function MockTable({children, columns, data, compareItems, renderItem}: MockTableProps) {
+        captureTableProps(columns, data, compareItems, renderItem);
         return <View testID="WorkspaceCompanyCardsTable">{children}</View>;
     }
 
+    MockTable.Row = ({children, accessibilityLabel}: {children: (state: {hovered: boolean}) => React.ReactNode; accessibilityLabel: string}) => (
+        <View accessibilityLabel={accessibilityLabel}>{children({hovered: false})}</View>
+    );
     MockTable.FilterBar = () => <View testID="WorkspaceCompanyCardsTableFilterBar" />;
     MockTable.Header = () => <View testID="WorkspaceCompanyCardsTableHeader" />;
     MockTable.ListHeader = ({children}: {children?: React.ReactNode}) => children ?? null;
@@ -400,5 +409,175 @@ describe('WorkspaceCompanyCardsTable row feedback', () => {
 
         // Then the feed-level prompt owns the root error while the independent field failure remains actionable on the row
         expect(capturedData.at(0)?.errors).toEqual({[START_DATE_ERROR_KEY]: 'Start date update failed'});
+    });
+});
+
+describe('WorkspaceCompanyCardsTable Last updated column', () => {
+    beforeEach(async () => {
+        jest.useFakeTimers().setSystemTime(new Date('2026-11-09T20:00:00Z'));
+        mockCardFeedErrors = {};
+        mockShouldUseNarrowLayout = false;
+        mockIsMediumScreenWidth = false;
+        await Onyx.clear();
+        await Onyx.set(ONYXKEYS.SESSION, {accountID: ACCOUNT_ID});
+        await Onyx.set(ONYXKEYS.PERSONAL_DETAILS_LIST, {
+            [ACCOUNT_ID]: {accountID: ACCOUNT_ID, displayName: 'Alice', timezone: {automatic: false, selected: 'America/Los_Angeles'}},
+        });
+        await waitForBatchedUpdates();
+    });
+
+    afterEach(() => {
+        mockShouldUseNarrowLayout = false;
+        mockIsMediumScreenWidth = false;
+        jest.useRealTimers();
+    });
+
+    it.each([
+        {lastScrape: '2026-11-05 02:30:00', expected: 'Nov 4', tooltip: '2026-11-04 18:30:00'},
+        {lastScrape: '2026-11-05T02:30:00Z', expected: 'Nov 4', tooltip: '2026-11-04 18:30:00'},
+        {lastScrape: '2026-11-04T21:30:00-05:00', expected: 'Nov 4', tooltip: '2026-11-04 18:30:00'},
+        {lastScrape: '2025-03-02T01:00:00Z', expected: 'Mar 1, 2025', tooltip: '2025-03-01 17:00:00'},
+    ])('formats $lastScrape as a local Spend date with an exact tooltip', async ({lastScrape, expected, tooltip}) => {
+        // Given a successful sync near a date boundary, in either supported timestamp format
+        const card = buildAssignedCard({lastScrape});
+
+        // When the table derives its columns and row data
+        renderTable(buildCompanyCards(card));
+        await waitForBatchedUpdates();
+
+        // Then the short date and full timestamp describe the same instant in the admin's timezone
+        const column = capturedColumns.find(({key}) => key === 'lastUpdated');
+        const row = capturedData.at(0);
+        expect(column?.label).toBe('Last updated');
+        expect(column?.sortable).toBe(true);
+        expect(row?.lastUpdatedText).toBe(expected);
+        expect(row?.lastUpdatedTooltip).toBe(tooltip);
+        expect(row?.lastUpdatedTimestamp).toBe(Date.parse(lastScrape.replace(' ', 'T') + (lastScrape.includes('T') ? '' : 'Z')));
+        expect(row && column?.dynamicSizing?.getContentToMeasure(row).at(0)?.text).toBe(expected);
+    });
+
+    it.each([undefined, '', 'invalid'])('handles an assigned card with timestamp %s', async (lastScrape) => {
+        // Given an assigned card without a usable successful-sync time
+        const card = buildAssignedCard({lastScrape});
+
+        // When the table prepares its row
+        renderTable(buildCompanyCards(card));
+        await waitForBatchedUpdates();
+
+        // Then it shows Never without inventing a time or a tooltip
+        expect(capturedData.at(0)?.lastUpdatedText).toBe('Never');
+        expect(capturedData.at(0)?.lastUpdatedTooltip).toBeUndefined();
+        expect(capturedData.at(0)?.lastUpdatedTimestamp).toBeUndefined();
+    });
+
+    it('leaves unassigned cells empty', async () => {
+        // Given an unassigned feed entry with no card record
+        const cards = buildCompanyCards();
+
+        // When the table prepares its row
+        renderTable(cards);
+        await waitForBatchedUpdates();
+
+        // Then it does not label unavailable history as Never or N/A
+        expect(capturedData.at(0)?.lastUpdatedText).toBeUndefined();
+        expect(capturedData.at(0)?.lastUpdatedTooltip).toBeUndefined();
+        expect(capturedData.at(0)?.lastUpdatedTimestamp).toBeUndefined();
+    });
+
+    it.each([true, false])('keeps the successful instant when isLoadingLastUpdated is %s', async (isLoadingLastUpdated) => {
+        // Given a prior success followed by a pending or failed manual update
+        const card = buildAssignedCard({
+            lastScrape: '2026-11-05 02:30:00',
+            isLoadingLastUpdated,
+            errorFields: isLoadingLastUpdated ? undefined : {lastScrape: {sync: 'Sync failed'}},
+        });
+
+        // When the table derives the display state
+        renderTable(buildCompanyCards(card));
+        await waitForBatchedUpdates();
+
+        // Then pending text does not replace the successful time used for sorting or the tooltip
+        expect(capturedData.at(0)?.lastUpdatedText).toBe(isLoadingLastUpdated ? 'Updating...' : 'Nov 4');
+        expect(capturedData.at(0)?.lastUpdatedTooltip).toBe('2026-11-04 18:30:00');
+        expect(capturedData.at(0)?.lastUpdatedTimestamp).toBe(Date.parse('2026-11-05T02:30:00Z'));
+    });
+
+    it('uses the selected local year and language for the abbreviated date', async () => {
+        // Given UTC is in the new year while Los Angeles is still in the previous year
+        jest.setSystemTime(new Date('2027-01-01T01:00:00Z'));
+        await Onyx.set(ONYXKEYS.NVP_PREFERRED_LOCALE, CONST.LOCALES.FR);
+        await waitForBatchedUpdates();
+
+        // When a date from the current local year is rendered
+        renderTable(buildCompanyCards(buildAssignedCard({lastScrape: '2026-11-05T02:30:00Z'})));
+        await waitForBatchedUpdates();
+
+        // Then the month is localized and no unnecessary year appears
+        expect(capturedData.at(0)?.lastUpdatedText).toBe('nov. 4');
+    });
+
+    it('sorts stale assigned cards first ascending and keeps unassigned cards last in both directions', async () => {
+        // Given tied timestamps, never-synced and updating cards, and two unassigned entries
+        const cards = buildCompanyCards();
+        cards.companyCardEntries = [
+            {cardName: '6000', encryptedCardNumber: '6', isAssigned: false},
+            {cardName: '3000', encryptedCardNumber: '3', isAssigned: true, assignedCard: buildAssignedCard({lastScrape: '2026-11-04 12:00:00'})},
+            {cardName: '4000', encryptedCardNumber: '4', isAssigned: true, assignedCard: buildAssignedCard({lastScrape: '2026-11-05T12:00:00Z', isLoadingLastUpdated: true})},
+            {cardName: '1000', encryptedCardNumber: '1', isAssigned: true, assignedCard: buildAssignedCard()},
+            {cardName: '2000', encryptedCardNumber: '2', isAssigned: true, assignedCard: buildAssignedCard({lastScrape: '2026-11-04T12:00:00Z'})},
+            {cardName: '5000', encryptedCardNumber: '5', isAssigned: false},
+        ];
+
+        // When sorting by sync time in each direction
+        renderTable(cards);
+        await waitForBatchedUpdates();
+        const sortedNames = (columnKey: string, order: 'asc' | 'desc') =>
+            [...capturedData].sort((a, b) => capturedCompareItems?.(a, b, {columnKey, order}) ?? 0).map(({cardName}) => cardName);
+
+        // Then ties are deterministic, stale cards are easy to find, and other columns keep their grouping
+        expect(sortedNames('lastUpdated', 'asc')).toEqual(['1000', '2000', '3000', '4000', '5000', '6000']);
+        expect(sortedNames('lastUpdated', 'desc')).toEqual(['4000', '3000', '2000', '1000', '6000', '5000']);
+        expect(sortedNames('card', 'asc')).toEqual(['5000', '6000', '1000', '2000', '3000', '4000']);
+    });
+
+    it.each([
+        {layout: 'wide', narrow: false, medium: false, visible: true},
+        {layout: 'narrow', narrow: true, medium: false, visible: false},
+        {layout: 'medium', narrow: false, medium: true, visible: false},
+    ])('renders the actual row in the $layout layout', async ({narrow, medium, visible}) => {
+        // Given an assigned card in the requested layout
+        mockShouldUseNarrowLayout = narrow;
+        mockIsMediumScreenWidth = medium;
+        renderTable(buildCompanyCards(buildAssignedCard({lastScrape: '2026-11-05 02:30:00'})));
+        await waitForBatchedUpdates();
+
+        // When the table's real row renderer runs
+        const row = capturedRenderItem?.(createMock<ListRenderItemInfo<WorkspaceCompanyCardTableItemData>>({item: capturedData.at(0), index: 0}));
+        render(<ComposeProviders components={[OnyxListItemProvider, LocaleContextProvider]}>{row}</ComposeProviders>);
+        await waitForBatchedUpdates();
+
+        // Then only wide rows gain a cell, and the successful timestamp has an accessible label in every layout
+        expect(!!screen.queryByText('Nov 4')).toBe(visible);
+        expect(screen.getByLabelText(/Last successful sync: 2026-11-04 18:30:00/)).toBeTruthy();
+    });
+});
+
+describe('WorkspaceCompanyCardsTable pending sync accessibility', () => {
+    it('announces an update with no previous success without claiming that Updating is a timestamp', async () => {
+        // Given a first sync is pending with no successful timestamp yet
+        mockCardFeedErrors = {};
+        await Onyx.clear();
+        renderTable(buildCompanyCards(buildAssignedCard({isLoadingLastUpdated: true})));
+        await waitForBatchedUpdates();
+
+        // When the actual row is rendered
+        const row = capturedRenderItem?.(createMock<ListRenderItemInfo<WorkspaceCompanyCardTableItemData>>({item: capturedData.at(0), index: 0}));
+        render(<ComposeProviders components={[OnyxListItemProvider, LocaleContextProvider]}>{row}</ComposeProviders>);
+        await waitForBatchedUpdates();
+
+        // Then the label describes the pending state without inventing a successful sync
+        expect(screen.getByLabelText(/Last updated: Updating/)).toBeTruthy();
+        expect(screen.queryByLabelText(/Last successful sync/)).toBeNull();
+        expect(capturedData.at(0)?.lastUpdatedTimestamp).toBeUndefined();
     });
 });

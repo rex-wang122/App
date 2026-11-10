@@ -5,7 +5,9 @@ import Icon from '@components/Icon';
 import type {TableData} from '@components/Table';
 import Table from '@components/Table';
 import {getCellAccessibilityProps, shouldUseTableSemantics} from '@components/Table/tableAccessibility';
+import Text from '@components/Text';
 import TextWithTooltip from '@components/TextWithTooltip';
+import Tooltip from '@components/Tooltip';
 
 import {useMemoizedLazyExpensifyIcons} from '@hooks/useLazyAsset';
 import useLocalize from '@hooks/useLocalize';
@@ -40,6 +42,11 @@ type WorkspaceCompanyCardTableRowData = TableData &
         onRenameName?: (newName: string) => void;
 
         exportAccountTitle?: string;
+        lastUpdatedText?: string;
+        /** Full local timestamp of the last successful sync, including while another sync is pending. */
+        lastUpdatedTooltip?: string;
+        /** Epoch milliseconds for sorting; undefined when no successful sync is recorded. */
+        lastUpdatedTimestamp?: number;
         onDismissError?: () => void;
     };
 
@@ -125,7 +132,18 @@ function WorkspaceCompanyCardTableRow({
         return Navigation.navigate(createDynamicRoute(DYNAMIC_ROUTES.WORKSPACE_COMPANY_CARD_DETAILS.getRoute(feedName, cardID.toString())));
     };
 
-    const accessibilityLabel = [memberColumnTitle, formattedCardDetails, formattedCustomCardName, item.exportAccountTitle].filter(Boolean).join(', ');
+    const lastUpdatedAccessibilityLabel = item.lastUpdatedText ? `${translate('workspace.moreFeatures.companyCards.lastUpdated')}: ${item.lastUpdatedText}` : undefined;
+    const lastSuccessfulSyncAccessibilityLabel = item.lastUpdatedTooltip ? `${translate('workspace.moreFeatures.companyCards.lastSuccessfulSync')}: ${item.lastUpdatedTooltip}` : undefined;
+    const accessibilityLabel = [
+        memberColumnTitle,
+        formattedCardDetails,
+        formattedCustomCardName,
+        item.exportAccountTitle,
+        lastUpdatedAccessibilityLabel,
+        lastSuccessfulSyncAccessibilityLabel,
+    ]
+        .filter(Boolean)
+        .join(', ');
 
     return (
         <Table.Row
@@ -212,6 +230,25 @@ function WorkspaceCompanyCardTableRow({
                                 text={item.exportAccountTitle ?? ''}
                                 style={[styles.lh16, styles.optionDisplayName, styles.pre]}
                             />
+                        </View>
+                    )}
+
+                    {!shouldUseNarrowTableLayout && (
+                        <View
+                            style={[styles.flex1, styles.mnw0, styles.justifyContentCenter]}
+                            {...getCellAccessibilityProps(isTableSemanticsEnabled)}
+                        >
+                            <Tooltip
+                                text={item.lastUpdatedTooltip}
+                                shouldRender={!!item.lastUpdatedTooltip}
+                            >
+                                <Text
+                                    numberOfLines={1}
+                                    style={[styles.lh16, styles.optionDisplayName, styles.pre]}
+                                >
+                                    {item.lastUpdatedText ?? ''}
+                                </Text>
+                            </Tooltip>
                         </View>
                     )}
 
